@@ -7,19 +7,25 @@ WinEnum is a PowerShell script designed to enumerate details about a Windows sys
 1. **Download the Script**  
    Download the `WinENum.ps1` script from [here](https://github.com/Adityaminz18/WinEnum/blob/main/WinENum.ps1) and save it to your desired location.
 
-2. **Change the Execution Policy**  
+2. **Install Dependencies**  
+   Ensure you have all necessary tools or modules installed that the script might require. For example, you can install additional PowerShell modules if required:
+   ```powershell
+   Install-Module -Name SomeRequiredModule -Force
+   ```
+
+3. **Change the Execution Policy**  
    To run the script, update the execution policy for the current process:
    ```powershell
    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
    ```
 
-3. **Run the Script**  
+4. **Run the Script**  
    Navigate to the directory where you saved the file and execute the script:
    ```powershell
    .\WinENum.ps1
    ```
 
-4. **Revert Execution Policy and Cleanup**  
+5. **Revert Execution Policy and Cleanup**  
    After running the script, change the execution policy back to its default setting and delete the script to ensure no residual files remain:
    ```powershell
    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Default

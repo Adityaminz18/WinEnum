@@ -21,7 +21,6 @@
     Case       : CaseSolved — Day 3
     Target     : Aman's Laptop
     Author     : Forensic Investigator
-    Date       : $(Get-Date -Format 'yyyy-MM-dd')
     Run As     : Administrator (elevated prompt required)
 #>
 
@@ -40,7 +39,7 @@ function Write-Banner {
   ╔══════════════════════════════════════════════════════════════╗
   ║   FORENSIC EVIDENCE COLLECTOR — Scheduled Task Artifacts    ║
   ║   Target Pattern : SnSensor{*}                              ║
-  ║   IOC            : mshta.exe → https://snconor.vg           ║
+  ║   IOC            : mshta.exe -> https://snconor.vg          ║
   ╚══════════════════════════════════════════════════════════════╝
 
 "@
@@ -48,7 +47,9 @@ function Write-Banner {
 }
 
 function Write-Section ([string]$Title) {
-    Write-Host "`n[$((Get-Date).ToString('HH:mm:ss'))] ▶ $Title" -ForegroundColor Yellow
+    $ts = (Get-Date).ToString('HH:mm:ss')
+    Write-Host ""
+    Write-Host "[$ts] > $Title" -ForegroundColor Yellow
 }
 
 function Write-Success ([string]$Msg) {
@@ -91,14 +92,14 @@ Write-Success "Transcript logging started"
 
 Write-Section "Enumerating Scheduled Tasks matching 'SnSensor{*}'"
 
-$matchingTasks = Get-ScheduledTask | Where-Object { $_.TaskName -like 'SnSensor{*}' }
+$matchingTasks = @(Get-ScheduledTask | Where-Object { $_.TaskName -like 'SnSensor{*}' })
 
-if (-not $matchingTasks) {
+if ($matchingTasks.Count -eq 0) {
     Write-Warn "No tasks matching 'SnSensor{*}' found. Broadening search to '*SnSensor*'..."
-    $matchingTasks = Get-ScheduledTask | Where-Object { $_.TaskName -like '*SnSensor*' }
+    $matchingTasks = @(Get-ScheduledTask | Where-Object { $_.TaskName -like '*SnSensor*' })
 }
 
-if (-not $matchingTasks) {
+if ($matchingTasks.Count -eq 0) {
     Write-Warn "No matching tasks found on this system."
     Write-Host "    Attempting to collect residual artifacts from the task filesystem..." -ForegroundColor Gray
 
@@ -131,56 +132,93 @@ foreach ($task in $matchingTasks) {
         $xmlContent = Export-ScheduledTask -TaskName $taskName -TaskPath $task.TaskPath
         $xmlFile = "$OutputDir\TaskXML\$($taskName).xml"
         $xmlContent | Out-File -FilePath $xmlFile -Encoding UTF8
-        Write-Success "Exported XML → $xmlFile"
+        Write-Success "Exported XML -> $xmlFile"
     } catch {
         Write-Warn "Failed to export XML for $taskName : $_"
     }
 
     # --- 2b. Collect task metadata ---
-    $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue
+    $taskInfo = $null
+    try {
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue
+    } catch {
+        Write-Info "Could not retrieve task run info for $taskName"
+    }
 
-    $record = [PSCustomObject]@{
-        TaskName          = $taskName
-        TaskPath          = $task.TaskPath
-        State             = $task.State
-        Author            = $task.Author
-        Description       = $task.Description
-        Date              = $task.Date
-        URI               = $task.URI
-        # Trigger details
-        TriggerCount      = ($task.Triggers | Measure-Object).Count
-        TriggerTypes      = ($task.Triggers | ForEach-Object { $_.CimClass.CimClassName }) -join '; '
-        TriggerDetails    = ($task.Triggers | ForEach-Object {
+    # Build trigger info safely
+    $triggerCountVal = 0
+    $triggerTypesVal = ''
+    $triggerDetailsVal = ''
+    if ($task.Triggers) {
+        $triggerCountVal = @($task.Triggers).Count
+        $triggerTypesVal = @($task.Triggers | ForEach-Object {
+            if ($_.CimClass) { $_.CimClass.CimClassName } else { 'Unknown' }
+        }) -join '; '
+        $triggerDetailsVal = @($task.Triggers | ForEach-Object {
             $props = $_ | Select-Object * -ExcludeProperty CimClass, CimInstanceProperties, CimSystemProperties, PSComputerName
             ($props.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', '
         }) -join ' | '
-        # Action details
-        ActionCount       = ($task.Actions | Measure-Object).Count
-        ActionExecute     = ($task.Actions | ForEach-Object { $_.Execute }) -join '; '
-        ActionArguments   = ($task.Actions | ForEach-Object { $_.Arguments }) -join '; '
-        # Principal / Security context
-        Principal_UserID  = $task.Principal.UserId
+    }
+
+    # Build action info safely
+    $actionCountVal = 0
+    $actionExecuteVal = ''
+    $actionArgsVal = ''
+    if ($task.Actions) {
+        $actionCountVal = @($task.Actions).Count
+        $actionExecuteVal = @($task.Actions | ForEach-Object { $_.Execute }) -join '; '
+        $actionArgsVal = @($task.Actions | ForEach-Object { $_.Arguments }) -join '; '
+    }
+
+    # Build run-history values safely
+    $lastRunTimeVal   = 'N/A'
+    $lastResultVal    = 'N/A'
+    $nextRunTimeVal   = 'N/A'
+    $missedRunsVal    = 'N/A'
+    if ($taskInfo) {
+        $lastRunTimeVal = $taskInfo.LastRunTime
+        $lastResultVal  = $taskInfo.LastTaskResult
+        $nextRunTimeVal = $taskInfo.NextRunTime
+        $missedRunsVal  = $taskInfo.NumberOfMissedRuns
+    }
+
+    $record = [PSCustomObject]@{
+        TaskName            = $taskName
+        TaskPath            = $task.TaskPath
+        State               = $task.State
+        Author              = $task.Author
+        Description         = $task.Description
+        Date                = $task.Date
+        URI                 = $task.URI
+        TriggerCount        = $triggerCountVal
+        TriggerTypes        = $triggerTypesVal
+        TriggerDetails      = $triggerDetailsVal
+        ActionCount         = $actionCountVal
+        ActionExecute       = $actionExecuteVal
+        ActionArguments     = $actionArgsVal
+        Principal_UserID    = $task.Principal.UserId
         Principal_LogonType = $task.Principal.LogonType
         Principal_RunLevel  = $task.Principal.RunLevel
-        # Run history
-        LastRunTime       = if ($taskInfo) { $taskInfo.LastRunTime } else { 'N/A' }
-        LastTaskResult    = if ($taskInfo) { $taskInfo.LastTaskResult } else { 'N/A' }
-        NextRunTime       = if ($taskInfo) { $taskInfo.NextRunTime } else { 'N/A' }
-        NumberOfMissedRuns = if ($taskInfo) { $taskInfo.NumberOfMissedRuns } else { 'N/A' }
+        LastRunTime         = $lastRunTimeVal
+        LastTaskResult      = $lastResultVal
+        NextRunTime         = $nextRunTimeVal
+        NumberOfMissedRuns  = $missedRunsVal
     }
 
     $taskReport += $record
     Write-Success "Metadata collected"
 
     # --- 2c. Check actions for mshta.exe / snconor.vg IOCs ---
-    foreach ($action in $task.Actions) {
-        $exe  = $action.Execute
-        $args = $action.Arguments
+    if ($task.Actions) {
+        foreach ($action in $task.Actions) {
+            $exe  = $action.Execute
+            $actionArgs = $action.Arguments
 
-        if ($exe -match 'mshta' -or $args -match 'snconor\.vg') {
-            Write-Warn "IOC MATCH — Action invokes mshta.exe with suspicious URL"
-            Write-Info "  Execute   : $exe"
-            Write-Info "  Arguments : $args"
+            if ($exe -match 'mshta' -or $actionArgs -match 'snconor\.vg') {
+                Write-Warn "IOC MATCH - Action invokes mshta.exe with suspicious URL"
+                Write-Info "  Execute   : $exe"
+                Write-Info "  Arguments : $actionArgs"
+            }
         }
     }
 
@@ -189,7 +227,7 @@ foreach ($task in $matchingTasks) {
     if (Test-Path $taskFilePath) {
         $destFile = "$OutputDir\TaskFiles\$($taskName)_raw"
         Copy-Item -Path $taskFilePath -Destination $destFile -Force
-        Write-Success "Raw task file copied → $destFile"
+        Write-Success "Raw task file copied -> $destFile"
 
         # Hash the file
         $hash = Get-FileHash -Path $destFile -Algorithm SHA256
@@ -205,11 +243,11 @@ foreach ($task in $matchingTasks) {
 if ($taskReport.Count -gt 0) {
     $csvPath = "$OutputDir\task_metadata_report.csv"
     $taskReport | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
-    Write-Success "Task metadata report → $csvPath"
+    Write-Success "Task metadata report -> $csvPath"
 
     $jsonPath = "$OutputDir\task_metadata_report.json"
     $taskReport | ConvertTo-Json -Depth 5 | Out-File -FilePath $jsonPath -Encoding UTF8
-    Write-Success "Task metadata report → $jsonPath"
+    Write-Success "Task metadata report -> $jsonPath"
 }
 
 # ─── 3. Registry evidence ────────────────────────────────────────────────────
@@ -228,27 +266,27 @@ foreach ($regPath in $regPaths) {
                 Where-Object { $_.Name -match 'SnSensor' }
 
             foreach ($key in $subKeys) {
-                $keyName = ($key.Name -replace '[\\/:*?"<>|]', '_')
+                $keyName = $key.PSChildName -replace '[\\/:*?"<>|]', '_'
                 $exportFile = "$OutputDir\Registry\$keyName.txt"
 
                 $key | Get-ItemProperty -ErrorAction SilentlyContinue |
                     Format-List * |
                     Out-File -FilePath $exportFile -Encoding UTF8
 
-                Write-Success "Registry key exported → $exportFile"
+                Write-Success "Registry key exported -> $exportFile"
             }
         } catch {
-            Write-Warn "Error reading registry path $regPath : $_"
+            Write-Warn "Error reading registry path ${regPath}: $_"
         }
     }
 }
 
 # Also dump the full TaskCache\Tree for context
 try {
-    $treeExport = "$OutputDir\Registry\TaskCache_Tree_Full.txt"
-    reg export "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree" $treeExport /y 2>$null
+    $treeExport = "$OutputDir\Registry\TaskCache_Tree_Full.reg"
+    $regExportResult = & reg export "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree" $treeExport /y 2>&1
     if (Test-Path $treeExport) {
-        Write-Success "Full TaskCache Tree exported → $treeExport"
+        Write-Success "Full TaskCache Tree exported -> $treeExport"
     }
 } catch {
     Write-Info "Could not export full TaskCache Tree"
@@ -261,10 +299,23 @@ Write-Section "Checking for Active mshta.exe Processes"
 $mshtaProcs = Get-Process -Name 'mshta' -ErrorAction SilentlyContinue
 
 if ($mshtaProcs) {
-    Write-Warn "mshta.exe is currently RUNNING — $($mshtaProcs.Count) instance(s)"
+    $mshtaArray = @($mshtaProcs)
+    Write-Warn "mshta.exe is currently RUNNING - $($mshtaArray.Count) instance(s)"
 
-    foreach ($proc in $mshtaProcs) {
+    foreach ($proc in $mshtaArray) {
         $procFile = "$OutputDir\Process\mshta_PID_$($proc.Id).txt"
+
+        $cmdLine = ''
+        $parentPid = ''
+        try {
+            $wmiProc = Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)" -ErrorAction SilentlyContinue
+            if ($wmiProc) {
+                $cmdLine = $wmiProc.CommandLine
+                $parentPid = $wmiProc.ParentProcessId
+            }
+        } catch {
+            Write-Info "Could not get WMI details for PID $($proc.Id)"
+        }
 
         [PSCustomObject]@{
             PID            = $proc.Id
@@ -273,24 +324,28 @@ if ($mshtaProcs) {
             CPU            = $proc.CPU
             WorkingSet_MB  = [math]::Round($proc.WorkingSet64 / 1MB, 2)
             Path           = $proc.Path
-            CommandLine    = (Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)" -ErrorAction SilentlyContinue).CommandLine
-            ParentPID      = (Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)" -ErrorAction SilentlyContinue).ParentProcessId
+            CommandLine    = $cmdLine
+            ParentPID      = $parentPid
         } | Format-List * | Out-File -FilePath $procFile -Encoding UTF8
 
-        Write-Success "Process details saved → $procFile"
+        Write-Success "Process details saved -> $procFile"
     }
 } else {
     Write-Info "mshta.exe is not currently running"
 }
 
 # Check for any scheduled-task-related svchost or taskeng processes
-$taskProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -match 'SnSensor|snconor\.vg|mshta' }
+try {
+    $taskProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and ($_.CommandLine -match 'SnSensor|snconor\.vg|mshta') }
 
-if ($taskProcs) {
-    $taskProcs | Select-Object ProcessId, Name, CommandLine, CreationDate, ParentProcessId |
-        Export-Csv -Path "$OutputDir\Process\ioc_related_processes.csv" -NoTypeInformation -Encoding UTF8
-    Write-Success "IOC-related processes exported"
+    if ($taskProcs) {
+        $taskProcs | Select-Object ProcessId, Name, CommandLine, CreationDate, ParentProcessId |
+            Export-Csv -Path "$OutputDir\Process\ioc_related_processes.csv" -NoTypeInformation -Encoding UTF8
+        Write-Success "IOC-related processes exported"
+    }
+} catch {
+    Write-Info "Could not enumerate running processes for IOC matches"
 }
 
 # ─── 5. Network artifacts ────────────────────────────────────────────────────
@@ -317,10 +372,14 @@ try {
     $connections = Get-NetTCPConnection -ErrorAction SilentlyContinue |
         Where-Object { $_.RemoteAddress -ne '0.0.0.0' -and $_.RemoteAddress -ne '::' }
 
-    $connections | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess,
-        @{N='ProcessName'; E={ (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName }} |
-        Export-Csv -Path "$OutputDir\Network\active_connections.csv" -NoTypeInformation -Encoding UTF8
-    Write-Success "Active TCP connections snapshot saved"
+    if ($connections) {
+        $connections | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess,
+            @{N='ProcessName'; E={ (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName }} |
+            Export-Csv -Path "$OutputDir\Network\active_connections.csv" -NoTypeInformation -Encoding UTF8
+        Write-Success "Active TCP connections snapshot saved"
+    } else {
+        Write-Info "No active TCP connections found"
+    }
 } catch {
     Write-Info "Could not capture network connections"
 }
@@ -331,6 +390,8 @@ try {
     if ($resolve) {
         $resolve | Format-List * | Out-File -FilePath "$OutputDir\Network\snconor_vg_dns_resolution.txt" -Encoding UTF8
         Write-Success "DNS resolution for snconor.vg saved"
+    } else {
+        Write-Info "DNS resolution returned no results for snconor.vg"
     }
 } catch {
     Write-Info "Could not resolve snconor.vg (may be offline or sinkholed)"
@@ -348,7 +409,7 @@ try {
     if ($taskEvents) {
         $taskEvents | Select-Object TimeCreated, Id, LevelDisplayName, Message |
             Export-Csv -Path "$OutputDir\task_scheduler_events.csv" -NoTypeInformation -Encoding UTF8
-        Write-Success "Task Scheduler events ($($taskEvents.Count) entries) exported"
+        Write-Success "Task Scheduler events ($(@($taskEvents).Count) entries) exported"
     } else {
         Write-Info "No Task Scheduler events referencing SnSensor found"
     }
@@ -367,7 +428,7 @@ try {
     if ($secEvents) {
         $secEvents | Select-Object TimeCreated, Id, LevelDisplayName, Message |
             Export-Csv -Path "$OutputDir\security_task_creation_events.csv" -NoTypeInformation -Encoding UTF8
-        Write-Success "Security event log — task creation events exported"
+        Write-Success "Security event log - task creation events exported"
     } else {
         Write-Info "No Security event 4698 (task creation) referencing SnSensor"
     }
@@ -379,29 +440,45 @@ try {
 
 Write-Section "Exporting Full Scheduled Tasks List (baseline)"
 
-Get-ScheduledTask | Select-Object TaskName, TaskPath, State, Author, Date |
-    Export-Csv -Path "$OutputDir\all_scheduled_tasks.csv" -NoTypeInformation -Encoding UTF8
-Write-Success "Full scheduled task list exported"
+try {
+    Get-ScheduledTask | Select-Object TaskName, TaskPath, State, Author, Date |
+        Export-Csv -Path "$OutputDir\all_scheduled_tasks.csv" -NoTypeInformation -Encoding UTF8
+    Write-Success "Full scheduled task list exported"
+} catch {
+    Write-Warn "Could not export full scheduled task list: $_"
+}
 
 # ─── 8. System context ───────────────────────────────────────────────────────
 
 Write-Section "Collecting System Context"
 
-$systemInfo = [PSCustomObject]@{
-    ComputerName   = $env:COMPUTERNAME
-    UserName       = $env:USERNAME
-    Domain         = $env:USERDOMAIN
-    OSVersion      = (Get-CimInstance Win32_OperatingSystem).Caption
-    OSBuild        = (Get-CimInstance Win32_OperatingSystem).BuildNumber
-    Architecture   = $env:PROCESSOR_ARCHITECTURE
-    CollectionTime = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC+00:00')
-    TimeZone       = (Get-TimeZone).DisplayName
-    IPAddresses    = ((Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+try {
+    $osInfo = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $ipAddrs = ''
+    try {
+        $ipAddrs = ((Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                         Where-Object { $_.IPAddress -ne '127.0.0.1' }).IPAddress -join ', ')
-}
+    } catch {
+        $ipAddrs = 'Could not retrieve'
+    }
 
-$systemInfo | Format-List * | Out-File -FilePath "$OutputDir\system_context.txt" -Encoding UTF8
-Write-Success "System context saved"
+    $systemInfo = [PSCustomObject]@{
+        ComputerName   = $env:COMPUTERNAME
+        UserName       = $env:USERNAME
+        Domain         = $env:USERDOMAIN
+        OSVersion      = if ($osInfo) { $osInfo.Caption } else { 'N/A' }
+        OSBuild        = if ($osInfo) { $osInfo.BuildNumber } else { 'N/A' }
+        Architecture   = $env:PROCESSOR_ARCHITECTURE
+        CollectionTime = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        TimeZone       = (Get-TimeZone).DisplayName
+        IPAddresses    = $ipAddrs
+    }
+
+    $systemInfo | Format-List * | Out-File -FilePath "$OutputDir\system_context.txt" -Encoding UTF8
+    Write-Success "System context saved"
+} catch {
+    Write-Warn "Could not collect system context: $_"
+}
 
 # ─── 9. Generate summary report ──────────────────────────────────────────────
 
@@ -409,88 +486,130 @@ Write-Section "Generating Evidence Summary Report"
 
 $reportPath = "$OutputDir\EVIDENCE_SUMMARY.txt"
 
-@"
-╔══════════════════════════════════════════════════════════════════╗
-║              FORENSIC EVIDENCE COLLECTION REPORT                ║
-║              Case: CaseSolved — Day 3                           ║
-╚══════════════════════════════════════════════════════════════════╝
+# Build task details section
+$taskDetailsText = ''
+if ($taskReport.Count -gt 0) {
+    $taskDetailLines = foreach ($t in $taskReport) {
+        @"
+  +- Task: $($t.TaskName)
+  |  State       : $($t.State)
+  |  Author      : $($t.Author)
+  |  Created     : $($t.Date)
+  |  Action(s)   : $($t.ActionExecute) $($t.ActionArguments)
+  |  Trigger(s)  : $($t.TriggerTypes)
+  |  Last Run    : $($t.LastRunTime)
+  |  Run Level   : $($t.Principal_RunLevel)
+  +------------------------------------------------------------
+"@
+    }
+    $taskDetailsText = $taskDetailLines -join "`r`n"
+} else {
+    $taskDetailsText = "  No matching tasks found during collection."
+}
 
-Collection Date  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-Computer Name    : $($env:COMPUTERNAME)
-Investigator     : $($env:USERNAME)
+# Build file listing
+$fileListText = ''
+try {
+    $collectedFiles = Get-ChildItem -Path $OutputDir -Recurse -File -ErrorAction SilentlyContinue
+    if ($collectedFiles) {
+        $fileLines = foreach ($cf in $collectedFiles) {
+            "    * $($cf.FullName.Replace($OutputDir, '.'))"
+        }
+        $fileListText = $fileLines -join "`r`n"
+    } else {
+        $fileListText = "    No files collected."
+    }
+} catch {
+    $fileListText = "    Could not enumerate collected files."
+}
+
+$collectionDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+$computerName = $env:COMPUTERNAME
+$userName = $env:USERNAME
+$taskCount = $matchingTasks.Count
+
+$reportContent = @"
+================================================================
+              FORENSIC EVIDENCE COLLECTION REPORT
+              Case: CaseSolved - Day 3
+================================================================
+
+Collection Date  : $collectionDate
+Computer Name    : $computerName
+Investigator     : $userName
 Target Artifact  : Scheduled Tasks matching "SnSensor{*}"
 IOC              : mshta.exe loading https://snconor.vg
 
-─── FINDINGS ──────────────────────────────────────────────────────
+--- FINDINGS ---------------------------------------------------
 
-Tasks Found      : $($matchingTasks.Count)
+Tasks Found      : $taskCount
 
 Task Details:
-$( ($taskReport | ForEach-Object {
-@"
-  ┌─ Task: $($_.TaskName)
-  │  State       : $($_.State)
-  │  Author      : $($_.Author)
-  │  Created     : $($_.Date)
-  │  Action(s)   : $($_.ActionExecute) $($_.ActionArguments)
-  │  Trigger(s)  : $($_.TriggerTypes)
-  │  Last Run    : $($_.LastRunTime)
-  │  Run Level   : $($_.Principal_RunLevel)
-  └────────────────────────────────────────────────────────────
-"@
-}) -join "`n" )
+$taskDetailsText
 
-─── IOC INDICATORS ────────────────────────────────────────────────
+--- IOC INDICATORS ---------------------------------------------
 
-  • mshta.exe is a Living-off-the-Land Binary (LOLBin) used to
+  * mshta.exe is a Living-off-the-Land Binary (LOLBin) used to
     execute remote HTA (HTML Application) payloads.
-  • The URL https://snconor.vg likely serves a malicious HTA
+  * The URL https://snconor.vg likely serves a malicious HTA
     file that downloads and executes secondary payloads.
-  • Two identically-patterned tasks (SnSensor{GUID}) suggest
+  * Two identically-patterned tasks (SnSensor{GUID}) suggest
     persistence via redundant scheduled task registration.
 
-─── EVIDENCE ARTIFACTS ────────────────────────────────────────────
+--- EVIDENCE ARTIFACTS -----------------------------------------
 
   Directory : $OutputDir
 
   Files collected:
-$( (Get-ChildItem -Path $OutputDir -Recurse -File | ForEach-Object {
-    "    • $($_.FullName.Replace($OutputDir, '.'))"
-}) -join "`n" )
+$fileListText
 
-─── CHAIN OF CUSTODY ──────────────────────────────────────────────
+--- CHAIN OF CUSTODY -------------------------------------------
 
-  Collection Start : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+  Collection Start : $collectionDate
   Method           : Automated PowerShell collection script
   Integrity        : SHA256 hashes recorded for all binary artifacts
 
-══════════════════════════════════════════════════════════════════
-"@ | Out-File -FilePath $reportPath -Encoding UTF8
+================================================================
+"@
 
-Write-Success "Evidence summary → $reportPath"
+$reportContent | Out-File -FilePath $reportPath -Encoding UTF8
+
+Write-Success "Evidence summary -> $reportPath"
 
 # ─── 10. Hash the entire evidence directory ───────────────────────────────────
 
 Write-Section "Computing Integrity Hashes for All Evidence Files"
 
-$allFiles = Get-ChildItem -Path $OutputDir -Recurse -File
-$hashReport = foreach ($f in $allFiles) {
-    $h = Get-FileHash -Path $f.FullName -Algorithm SHA256
-    [PSCustomObject]@{
-        File   = $f.FullName.Replace($OutputDir, '.')
-        SHA256 = $h.Hash
+$allFiles = Get-ChildItem -Path $OutputDir -Recurse -File -ErrorAction SilentlyContinue
+if ($allFiles) {
+    $hashReport = foreach ($f in $allFiles) {
+        try {
+            $h = Get-FileHash -Path $f.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue
+            if ($h) {
+                [PSCustomObject]@{
+                    File   = $f.FullName.Replace($OutputDir, '.')
+                    SHA256 = $h.Hash
+                }
+            }
+        } catch {
+            Write-Info "Could not hash: $($f.Name)"
+        }
     }
-}
 
-$hashReport | Export-Csv -Path "$OutputDir\Hashes\all_evidence_hashes.csv" -NoTypeInformation -Encoding UTF8
-Write-Success "All evidence hashed ($($allFiles.Count) files)"
+    if ($hashReport) {
+        $hashReport | Export-Csv -Path "$OutputDir\Hashes\all_evidence_hashes.csv" -NoTypeInformation -Encoding UTF8
+    }
+    Write-Success "All evidence hashed ($(@($allFiles).Count) files)"
+} else {
+    Write-Info "No files found to hash"
+}
 
 # ─── Cleanup ──────────────────────────────────────────────────────────────────
 
 Stop-Transcript | Out-Null
 
-Write-Host "`n" -NoNewline
-Write-Host "  ✅ Evidence collection complete." -ForegroundColor Green
-Write-Host "  📁 Output: $OutputDir" -ForegroundColor Cyan
-Write-Host "  📄 Report: $reportPath" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  [DONE] Evidence collection complete." -ForegroundColor Green
+Write-Host "  [DIR]  Output: $OutputDir" -ForegroundColor Cyan
+Write-Host "  [RPT]  Report: $reportPath" -ForegroundColor Cyan
 Write-Host ""
